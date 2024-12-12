@@ -192,9 +192,14 @@ function renderPage(pageNum) {
   rendering = true;
 
   pdfDoc.getPage(pageNum).then((page) => {
-    const viewport = page.getViewport({ scale: 2 });
+    const viewport = page.getViewport({ scale: 2 }); // Fator de escala
     $(pdfCanvas).attr({ width: viewport.width, height: viewport.height });
     $(signatureCanvas).attr({ width: viewport.width, height: viewport.height });
+
+    // Salve o fator de escala e as dimensões para ajustar no salvamento
+    $(pdfCanvas).data("scale", viewport.scale);
+    $(pdfCanvas).data("width", viewport.width);
+    $(pdfCanvas).data("height", viewport.height);
 
     const renderContext = {
       canvasContext: pdfCtx,
@@ -286,7 +291,7 @@ $(finishSignatureButton).on("click", () => {
 
   if (activeTab === "draw-tab") {
     const signatureImage = new Image();
-    signatureImage.src = drawCanvas.toDataURL();
+    signatureImage.src = drawCanvas.toDataURL("image/png");
     $(signatureImage).on("load", () => {
       addSignature(signatureImage);
     });
@@ -319,7 +324,7 @@ $(finishSignatureButton).on("click", () => {
     ctx.fillText(text, 10, 50);
 
     const signatureImage = new Image();
-    signatureImage.src = canvas.toDataURL();
+    signatureImage.src = drawCanvas.toDataURL("image/png");
     $(signatureImage).on("load", () => {
       addSignature(signatureImage);
     });
@@ -367,53 +372,60 @@ $(drawCanvas).on("mouseup", () => {
 });
 
 $(savePdfButton).on("click", async () => {
-  const { jsPDF } = window.jspdf;
-  let pdf = new jsPDF();
+  const { PDFDocument } = PDFLib;
+
+  // Carregar o PDF original
+  const pdfBytes = await pdfDoc.getData();
+  const loadedPdf = await PDFDocument.load(pdfBytes);
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-    const page = await pdfDoc.getPage(pageNum);
-    const viewport = page.getViewport({ scale: 2 });
+    const page = loadedPdf.getPage(pageNum - 1);
 
-    const isLandscape = viewport.width > viewport.height;
-    const orientation = isLandscape ? "l" : "p";
-
-    const ptPerPx = 0.75;
-    const pageWidthPt = viewport.width * ptPerPx;
-    const pageHeightPt = viewport.height * ptPerPx;
-
-    if (pageNum === 1) {
-      pdf = new jsPDF(orientation, "pt", [pageWidthPt, pageHeightPt]);
-    } else {
-      pdf.addPage(orientation, "pt", [pageWidthPt, pageHeightPt]);
-    }
-
-    const pageCanvas = document.createElement("canvas");
-    const pageContext = pageCanvas.getContext("2d");
-
-    pageCanvas.width = viewport.width;
-    pageCanvas.height = viewport.height;
-
-    await page.render({ canvasContext: pageContext, viewport }).promise;
-
-    const tempCanvas = document.createElement("canvas");
-    tempCanvas.width = viewport.width;
-    tempCanvas.height = viewport.height;
-
-    const tempCtx = tempCanvas.getContext("2d");
-    tempCtx.drawImage(pageCanvas, 0, 0);
+    const { width: pdfWidth, height: pdfHeight } = page.getSize();
+    const canvasScale = $(pdfCanvas).data("scale") || 1;
+    const canvasWidth = $(pdfCanvas).data("width");
+    const canvasHeight = $(pdfCanvas).data("height");
 
     if (signatures[pageNum]) {
-      signatures[pageNum].forEach((sig) => {
-        tempCtx.drawImage(sig.image, sig.x, sig.y, sig.width, sig.height);
-      });
+      for (const sig of signatures[pageNum]) {
+        try {
+          const signatureImage = sig.image.src.split(",")[1];
+
+          if (!signatureImage) continue;
+
+          const imageBytes = new Uint8Array(
+            atob(signatureImage)
+              .split("")
+              .map((char) => char.charCodeAt(0))
+          );
+
+          const embeddedImage = await loadedPdf.embedPng(imageBytes);
+
+          const x = (sig.x / canvasWidth) * pdfWidth;
+          const y =
+            pdfHeight -
+            (sig.y / canvasHeight) * pdfHeight -
+            (sig.height / canvasHeight) * pdfHeight;
+          const width = (sig.width / canvasWidth) * pdfWidth;
+          const height = (sig.height / canvasHeight) * pdfHeight;
+
+          page.drawImage(embeddedImage, {
+            x,
+            y,
+            width,
+            height,
+          });
+        } catch (error) {
+          console.error("Erro ao adicionar assinatura:", error);
+        }
+      }
     }
-
-    const pageData = tempCanvas.toDataURL("image/jpeg", 1.0);
-    const pageWidthPdf = pageWidthPt;
-    const pageHeightPdf = pageHeightPt;
-
-    pdf.addImage(pageData, "JPEG", 0, 0, pageWidthPdf, pageHeightPdf);
   }
 
-  pdf.save("documento_assinado.pdf");
+  const pdfData = await loadedPdf.save();
+  const blob = new Blob([pdfData], { type: "application/pdf" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "documento_assinado.pdf";
+  link.click();
 });
